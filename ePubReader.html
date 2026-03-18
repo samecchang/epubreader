@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<title>EPUB Reader</title>
+<style>
+:root{--bg:#e8e0d0;--page:#faf6ed;--text:#2a2520;--shadow:rgba(0,0,0,.35);--ui:#5a4e42;--ui-hover:#3a3228;--accent:#8b7355;--fs:18px;--margin:36px}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;touch-action:none}
+body{background:var(--bg);font-family:Georgia,"Times New Roman",serif;color:var(--text)}
+
+/* ── Loading / file picker overlay ── */
+#overlay{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;transition:opacity .4s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay h1{font-size:28px;color:var(--ui);margin-bottom:12px;font-weight:400}
+#overlay p{color:var(--accent);font-size:15px;margin-bottom:24px}
+#overlay .pick-btn{display:inline-block;padding:14px 32px;background:var(--ui);color:#fff;border-radius:10px;font-size:16px;cursor:pointer;border:none;transition:background .15s}
+#overlay .pick-btn:hover{background:var(--ui-hover)}
+#fileInput{display:none}
+#loadStatus{margin-top:16px;font-size:14px;color:var(--accent)}
+
+/* ── Book container ── */
+#book{position:fixed;inset:0;display:none;overflow:hidden;perspective:1200px}
+#book.show{display:block}
+
+/* ── Page panels ── */
+.page-panel{position:absolute;top:0;bottom:0;overflow:hidden;background:var(--page)}
+#pageLeft{left:0;right:50%;box-shadow:1px 0 0 rgba(0,0,0,.08);z-index:1}
+#pageRight{left:50%;right:0;z-index:1}
+.page-panel .content,.flip-face .content{position:absolute;inset:0;padding:30px 0;font-size:var(--fs);line-height:1.7;overflow:hidden;column-fill:auto;user-select:none}
+.page-panel .content .spine-item,.flip-face .content .spine-item{padding:0 32px;break-before:column}
+.page-panel .content img,.flip-face .content img{max-width:100%;height:auto}
+.page-panel .content h1,.page-panel .content h2,.page-panel .content h3,.flip-face .content h1,.flip-face .content h2,.flip-face .content h3{margin:0.5em 0 0.3em;line-height:1.3}
+.page-panel .content p,.flip-face .content p{margin:0 0 0.6em;text-align:justify}
+
+/* single-page mode (narrow screens) */
+body.single-page #pageLeft{right:0}
+body.single-page #pageRight{display:none}
+
+/* ── CSS3 3D Flip ── */
+#flipPage{position:absolute;top:0;bottom:0;z-index:5;display:none;transform-style:preserve-3d;--face-shade:0}
+#flipPage.active{display:block}
+.flip-face{position:absolute;inset:0;backface-visibility:hidden;overflow:hidden;background:var(--page)}
+.flip-face::after{content:'';position:absolute;inset:0;pointer-events:none;opacity:var(--face-shade,0)}
+.flip-front{z-index:2}
+.flip-front::after{background:linear-gradient(to left,rgba(0,0,0,.35) 0%,rgba(0,0,0,.12) 30%,transparent 80%)}
+.flip-back{transform:rotateY(180deg);z-index:1}
+.flip-back::after{background:linear-gradient(to right,rgba(0,0,0,.3) 0%,rgba(0,0,0,.08) 25%,transparent 70%)}
+#flipPage.flip-forward{left:50%;right:0;transform-origin:left center}
+#flipPage.flip-backward{left:0;right:50%;transform-origin:right center}
+body.single-page #flipPage.flip-forward{left:0;right:0;transform-origin:left center}
+body.single-page #flipPage.flip-backward{left:0;right:0;transform-origin:right center}
+#flipPage.animating{transition:transform 0.6s cubic-bezier(.4,.0,.2,1)}
+#flipShadow{position:absolute;top:0;bottom:0;z-index:4;pointer-events:none;opacity:0;background:linear-gradient(to right,rgba(0,0,0,.18) 0%,rgba(0,0,0,.08) 40%,transparent 100%)}
+
+/* ── Controls bar ── */
+#controls{position:fixed;bottom:0;left:0;right:0;z-index:20;display:flex;align-items:center;justify-content:center;gap:10px;padding:8px 16px;background:rgba(90,78,66,.85);backdrop-filter:blur(6px);transition:opacity .4s;opacity:0}
+#controls.show{opacity:1}
+#controls button{background:none;border:1px solid rgba(255,255,255,.25);color:#fff;padding:6px 14px;border-radius:8px;font-size:14px;cursor:pointer;transition:background .15s}
+#controls button:hover{background:rgba(255,255,255,.12)}
+#pageInfo{color:rgba(255,255,255,.7);font-size:13px;min-width:90px;text-align:center}
+#controls .sep{width:1px;height:20px;background:rgba(255,255,255,.15);margin:0 4px}
+#progressBar{width:120px;height:4px;accent-color:#fff;cursor:pointer;vertical-align:middle}
+
+/* ── Dark mode ── */
+body.dark{--bg:#1a1a1e;--page:#252528;--text:#d4cfc8;--shadow:rgba(0,0,0,.6);--ui:#888;--accent:#777}
+
+/* ── Accessibility ── */
+#sr-info{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+</style>
+</head>
+<body>
+
+<!-- File picker overlay -->
+<div id="overlay">
+  <h1>EPUB Reader</h1>
+  <p>Open a local .epub file to start reading</p>
+  <label class="pick-btn" for="fileInput" role="button" aria-label="Choose EPUB file">Choose EPUB File</label>
+  <input type="file" id="fileInput" accept=".epub,application/epub+zip"/>
+  <div id="loadStatus"></div>
+</div>
+
+<!-- Book view -->
+<div id="book">
+  <div class="page-panel" id="pageLeft"><div class="content" id="contentLeft"></div></div>
+  <div class="page-panel" id="pageRight"><div class="content" id="contentRight"></div></div>
+  <div id="flipPage">
+    <div class="flip-face flip-front"><div class="content" id="flipFront"></div></div>
+    <div class="flip-face flip-back"><div class="content" id="flipBack"></div></div>
+  </div>
+  <div id="flipShadow"></div>
+</div>
+
+<!-- Controls -->
+<div id="controls">
+  <button id="btnPrev" aria-label="Previous page">◀ Prev</button>
+  <span id="pageInfo">–</span>
+  <button id="btnNext" aria-label="Next page">Next ▶</button>
+  <input type="range" id="progressBar" min="0" max="0" value="0" aria-label="Page progress"/>
+  <div class="sep"></div>
+  <button id="btnFontDec" aria-label="Decrease font size">A−</button>
+  <button id="btnFontInc" aria-label="Increase font size">A+</button>
+  <div class="sep"></div>
+  <button id="btnDark" aria-label="Toggle dark mode">☾</button>
+</div>
+
+<div id="sr-info" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+/* ================================================================
+   EPUB Reader — Pure HTML/CSS/JS
+   Architecture:
+   1. ZIP parser reads EPUB (which is a ZIP) using DecompressionStream
+   2. Parse container.xml → find OPF → parse spine + manifest
+   3. Render each spine item's HTML into a hidden measurer div
+   4. Paginate by measuring overflow at current font size
+   5. Display pages in a book layout (single or double spread)
+   6. CSS3 3D page flip animation using rotateY transforms
+   7. Navigation via buttons, keyboard, mouse drag, touch swipe
+   8. Font size via buttons and pinch gesture
+   ================================================================ */
+(function(){
+'use strict';
+
+/* ── DOM refs ── */
+var overlay    = document.getElementById('overlay');
+var fileInput  = document.getElementById('fileInput');
+var loadStatus = document.getElementById('loadStatus');
+var book       = document.getElementById('book');
+var pageLeft   = document.getElementById('pageLeft');
+var pageRight  = document.getElementById('pageRight');
+var contentLeft  = document.getElementById('contentLeft');
+var contentRight = document.getElementById('contentRight');
+var flipPageEl = document.getElementById('flipPage');
+var flipFront  = document.getElementById('flipFront');
+var flipBack   = document.getElementById('flipBack');
+var flipShadow = document.getElementById('flipShadow');
+var btnPrev    = document.getElementById('btnPrev');
+var btnNext    = document.getElementById('btnNext');
+var progressBar = document.getElementById('progressBar');
+var btnFontDec = document.getElementById('btnFontDec');
+var btnFontInc = document.getElementById('btnFontInc');
+var btnDark    = document.getElementById('btnDark');
+var pageInfo   = document.getElementById('pageInfo');
+var controls   = document.getElementById('controls');
+var srInfo     = document.getElementById('sr-info');
+
+/* ── State ── */
+var pages = [];           // array of HTML strings (one per page)
+var currentPage = 0;      // index of left page in double mode, or current in single
+var fontSize = 18;        // px
+var isSingle = false;     // single page mode
+var isDark = false;
+var epubData = null;      // parsed epub { spine:[], manifest:{}, files:{} }
+var controlsTimer = null;
+var dpr = window.devicePixelRatio || 1;
+
+/* ================================================================
+   ZIP PARSER — reads EPUB (ZIP) using pure JS
+   EPUB is a ZIP archive. We parse the central directory to find
+   file entries, then decompress each using DecompressionStream.
+   ================================================================ */
+
+async function readZip(arrayBuffer){
+  var bytes = new Uint8Array(arrayBuffer);
+  var files = {};
+
+  /* Find End of Central Directory (last 22+ bytes) */
+  var eocdOffset = -1;
+  for(var i = bytes.length - 22; i >= 0 && i >= bytes.length - 65557; i--){
+    if(bytes[i]===0x50 && bytes[i+1]===0x4b && bytes[i+2]===0x05 && bytes[i+3]===0x06){
+      eocdOffset = i; break;
+    }
+  }
+  if(eocdOffset < 0) throw new Error('Not a valid ZIP/EPUB file');
+
+  var view = new DataView(arrayBuffer);
+  var cdOffset = view.getUint32(eocdOffset + 16, true);
+  var cdEntries = view.getUint16(eocdOffset + 10, true);
+
+  /* Read Central Directory entries */
+  var pos = cdOffset;
+  for(var e = 0; e < cdEntries; e++){
+    if(view.getUint32(pos, true) !== 0x02014b50) break;
+    var method     = view.getUint16(pos + 10, true);
+    var compSize   = view.getUint32(pos + 20, true);
+    var uncompSize = view.getUint32(pos + 24, true);
+    var nameLen    = view.getUint16(pos + 28, true);
+    var extraLen   = view.getUint16(pos + 30, true);
+    var commentLen = view.getUint16(pos + 32, true);
+    var localOff   = view.getUint32(pos + 42, true);
+    var name = new TextDecoder().decode(bytes.subarray(pos + 46, pos + 46 + nameLen));
+    pos += 46 + nameLen + extraLen + commentLen;
+
+    /* Skip directories */
+    if(name.endsWith('/')) continue;
+
+    /* Find local file header to get actual data offset */
+    var lNameLen  = view.getUint16(localOff + 26, true);
+    var lExtraLen = view.getUint16(localOff + 28, true);
+    var dataStart = localOff + 30 + lNameLen + lExtraLen;
+    var rawData   = bytes.subarray(dataStart, dataStart + compSize);
+
+    if(method === 0){
+      /* Stored (no compression) */
+      files[name] = rawData.slice();
+    } else if(method === 8){
+      /* Deflate — use DecompressionStream */
+      try {
+        files[name] = await inflateData(rawData);
+      } catch(err){
+        console.warn('Failed to decompress:', name, err);
+      }
+    }
+  }
+  return files;
+}
+
+async function inflateData(compressedBytes){
+  /* Wrap raw deflate in a stream and decompress */
+  var ds = new DecompressionStream('deflate-raw');
+  var writer = ds.writable.getWriter();
+  writer.write(compressedBytes);
+  writer.close();
+  var reader = ds.readable.getReader();
+  var chunks = [];
+  while(true){
+    var result = await reader.read();
+    if(result.done) break;
+    chunks.push(result.value);
+  }
+  var totalLen = 0;
+  for(var c = 0; c < chunks.length; c++) totalLen += chunks[c].length;
+  var out = new Uint8Array(totalLen);
+  var off = 0;
+  for(var c = 0; c < chunks.length; c++){
+    out.set(chunks[c], off);
+    off += chunks[c].length;
+  }
+  return out;
+}
+
+function fileAsText(files, path){
+  if(!files[path]) return '';
+  return new TextDecoder().decode(files[path]);
+}
+
+function fileAsDataURL(files, path){
+  if(!files[path]) return '';
+  var ext = path.split('.').pop().toLowerCase();
+  var mime = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',svg:'image/svg+xml',webp:'image/webp'}[ext] || 'application/octet-stream';
+  var b64 = uint8ToBase64(files[path]);
+  return 'data:' + mime + ';base64,' + b64;
+}
+
+function uint8ToBase64(u8){
+  var str = '';
+  for(var i = 0; i < u8.length; i++) str += String.fromCharCode(u8[i]);
+  return btoa(str);
+}
+
+/* ================================================================
+   EPUB PARSER
+   1. Read META-INF/container.xml → find OPF path
+   2. Parse OPF → manifest (id→href) + spine (ordered list)
+   3. Return { spine: [href, ...], manifest: {id: {href,media}}, files }
+   ================================================================ */
+
+async function parseEpub(arrayBuffer){
+  loadStatus.textContent = 'Extracting files...';
+  var files = await readZip(arrayBuffer);
+
+  loadStatus.textContent = 'Parsing structure...';
+  /* container.xml */
+  var containerXml = fileAsText(files, 'META-INF/container.xml');
+  if(!containerXml) throw new Error('Missing container.xml');
+  var opfMatch = containerXml.match(/full-path="([^"]+)"/);
+  if(!opfMatch) throw new Error('Cannot find OPF path');
+  var opfPath = opfMatch[1];
+  var opfDir = opfPath.substring(0, opfPath.lastIndexOf('/') + 1);
+
+  /* Parse OPF */
+  var opfXml = fileAsText(files, opfPath);
+  if(!opfXml) throw new Error('Cannot read OPF file');
+  var parser = new DOMParser();
+  var opfDoc = parser.parseFromString(opfXml, 'application/xml');
+
+  /* Manifest */
+  var manifest = {};
+  var items = opfDoc.querySelectorAll('manifest > item');
+  for(var i = 0; i < items.length; i++){
+    var id = items[i].getAttribute('id');
+    var href = items[i].getAttribute('href');
+    var media = items[i].getAttribute('media-type') || '';
+    manifest[id] = { href: opfDir + href, media: media };
+  }
+
+  /* Spine */
+  var spine = [];
+  var spineItems = opfDoc.querySelectorAll('spine > itemref');
+  for(var j = 0; j < spineItems.length; j++){
+    var idref = spineItems[j].getAttribute('idref');
+    if(manifest[idref]) spine.push(manifest[idref].href);
+  }
+
+  /* Title */
+  var titleEl = opfDoc.querySelector('metadata > *|title');
+  var title = titleEl ? titleEl.textContent : 'Untitled';
+
+  return { spine: spine, manifest: manifest, files: files, opfDir: opfDir, title: title };
+}
+
+/* ================================================================
+   CONTENT RENDERING — convert spine HTML to sanitised content
+   Resolves images to data URLs, strips scripts, keeps basic styling.
+   ================================================================ */
+
+function renderSpineItem(epub, href){
+  var html = fileAsText(epub.files, href);
+  if(!html) return '';
+  var itemDir = href.substring(0, href.lastIndexOf('/') + 1);
+
+  /* Parse HTML */
+  var parser = new DOMParser();
+  var doc = parser.parseFromString(html, 'application/xhtml+xml');
+  if(doc.querySelector('parsererror')){
+    doc = parser.parseFromString(html, 'text/html');
+  }
+
+  /* Remove scripts */
+  var scripts = doc.querySelectorAll('script');
+  for(var i = 0; i < scripts.length; i++) scripts[i].remove();
+
+  /* Resolve images */
+  var imgs = doc.querySelectorAll('img, image');
+  for(var j = 0; j < imgs.length; j++){
+    var src = imgs[j].getAttribute('src') || imgs[j].getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+    if(src && !src.startsWith('data:')){
+      var resolved = resolvePath(itemDir, src);
+      var dataUrl = fileAsDataURL(epub.files, resolved);
+      if(imgs[j].tagName === 'image'){
+        imgs[j].setAttributeNS('http://www.w3.org/1999/xlink', 'href', dataUrl);
+      } else {
+        imgs[j].setAttribute('src', dataUrl);
+      }
+    }
+  }
+
+  /* Extract body content */
+  var body = doc.querySelector('body');
+  return body ? body.innerHTML : doc.documentElement.innerHTML;
+}
+
+function resolvePath(base, rel){
+  if(rel.startsWith('/')) return rel.substring(1);
+  var parts = base.split('/');
+  parts.pop();
+  var relParts = rel.split('/');
+  for(var i = 0; i < relParts.length; i++){
+    if(relParts[i] === '..') parts.pop();
+    else if(relParts[i] !== '.') parts.push(relParts[i]);
+  }
+  return parts.join('/');
+}
+
+/* ================================================================
+   PAGINATION ENGINE
+   Flow all spine content into a measurer div, then split into
+   page-sized chunks using column layout.
+   ================================================================ */
+
+var allContent = '';  // concatenated HTML from all spine items
+
+var measuredColW = 0; /* actual column width from element measurement */
+
+function paginateContent(){
+  if(!allContent) return;
+  pages = [];
+
+  /* Use contentLeft's actual rendered width for accurate column sizing.
+     This avoids the 1-pixel drift caused by borders/rounding.       */
+  contentLeft.style.fontSize = fontSize + 'px';
+  contentLeft.style.columnWidth = '999999px'; /* reset to 1 col */
+  contentLeft.style.columnGap = '0px';
+  contentLeft.innerHTML = allContent;
+  contentLeft.offsetHeight; /* reflow to get real dimensions */
+
+  var panelW = contentLeft.clientWidth; /* actual width */
+  if(panelW < 1) panelW = getPageWidth();
+  measuredColW = panelW;
+
+  contentLeft.style.columnWidth = panelW + 'px';
+  contentLeft.offsetHeight; /* reflow with correct columns */
+
+  var sw = contentLeft.scrollWidth;
+  var numP = Math.max(1, Math.round(sw / panelW));
+  for(var p = 0; p < numP; p++) pages.push(p);
+
+  contentLeft.innerHTML = '';
+}
+
+function getPageWidth(){
+  if(isSingle) return window.innerWidth;
+  return Math.floor(window.innerWidth / 2);
+}
+
+function getPageHeight(){
+  return window.innerHeight;
+}
+
+/* Helper: render a page index into a content element */
+function renderPageInto(el, pageIdx){
+  var w = measuredColW || getPageWidth();
+  el.style.fontSize = fontSize + 'px';
+  el.style.columnWidth = w + 'px';
+  el.style.columnGap = '0px';
+  el.innerHTML = allContent;
+  el.offsetHeight;
+  el.scrollLeft = pageIdx * w;
+}
+
+/* ================================================================
+   PAGE DISPLAY
+   Render current page(s) using CSS column offset trick.
+   ================================================================ */
+
+function displayPages(){
+  /* Reset flip state */
+  flipPageEl.classList.remove('active','animating','flip-forward','flip-backward');
+  flipPageEl.style.transform = '';
+  flipShadow.style.opacity = '0';
+  flipFront.innerHTML = '';
+  flipBack.innerHTML = '';
+
+  /* Left page */
+  var leftIdx = currentPage;
+  if(leftIdx >= 0 && leftIdx < pages.length){
+    renderPageInto(contentLeft, leftIdx);
+  } else {
+    contentLeft.innerHTML = '';
+  }
+
+  /* Right page (double mode) */
+  if(!isSingle){
+    var rightIdx = currentPage + 1;
+    if(rightIdx >= 0 && rightIdx < pages.length){
+      renderPageInto(contentRight, rightIdx);
+    } else {
+      contentRight.innerHTML = '';
+    }
+  }
+
+  /* Update page info + progress bar */
+  var display;
+  if(isSingle){
+    display = (currentPage + 1) + ' / ' + pages.length;
+  } else {
+    var l = currentPage + 1;
+    var r = Math.min(currentPage + 2, pages.length);
+    display = l + (r > l ? '–' + r : '') + ' / ' + pages.length;
+  }
+  pageInfo.textContent = display;
+  srInfo.textContent = 'Page ' + display;
+
+  progressBar.max = Math.max(0, pages.length - 1);
+  progressBar.value = currentPage;
+
+  /* Save position */
+  try { localStorage.setItem('epub_page', currentPage); localStorage.setItem('epub_fs', fontSize); } catch(e){}
+}
+
+/* ================================================================
+   CSS3 3D PAGE FLIP
+   Uses perspective + rotateY + backface-visibility for a realistic
+   book page turning effect driven by CSS transitions or drag.
+   ================================================================ */
+
+var flip = {
+  active: false,
+  direction: 0,   // 1 = forward, -1 = backward
+  angle: 0,       // current rotation in degrees
+  animating: false
+};
+
+/* ── Set up the flip: populate front/back faces and position flipPage ── */
+function setupFlip(dir){
+  flip.direction = dir;
+  flip.active = true;
+  flip.angle = 0;
+
+  var step = pageStep();
+  var destPage = dir === 1 ? currentPage + step : currentPage - step;
+  if(destPage < 0 || destPage >= pages.length) return;
+
+  /* Position and classify flipPage */
+  flipPageEl.className = (dir === 1 ? 'flip-forward' : 'flip-backward') + ' active';
+  flipPageEl.style.transform = 'rotateY(0deg)';
+
+  if(dir === 1){
+    /* Forward: right page (or single page) flips left around the spine */
+    if(isSingle){
+      renderPageInto(flipFront, currentPage);
+      renderPageInto(flipBack, destPage);
+      /* Underneath: show destination */
+      renderPageInto(contentLeft, destPage);
+    } else {
+      renderPageInto(flipFront, currentPage + 1); /* current right page */
+      renderPageInto(flipBack, destPage);          /* new left page (back of turned sheet) */
+      /* Underneath: reveal new right page */
+      if(destPage + 1 < pages.length){
+        renderPageInto(contentRight, destPage + 1);
+      } else {
+        contentRight.innerHTML = '';
+      }
+    }
+  } else {
+    /* Backward: left page (or single page) flips right around the spine */
+    if(isSingle){
+      renderPageInto(flipFront, currentPage);
+      renderPageInto(flipBack, destPage);
+      renderPageInto(contentLeft, destPage);
+    } else {
+      renderPageInto(flipFront, currentPage);  /* current left page */
+      if(destPage + 1 < pages.length){
+        renderPageInto(flipBack, destPage + 1); /* new right page (back of turned sheet) */
+      }
+      /* Underneath: reveal new left page */
+      renderPageInto(contentLeft, destPage);
+    }
+  }
+
+  /* Position shadow overlay */
+  if(isSingle){
+    flipShadow.style.left = '0';
+    flipShadow.style.right = '0';
+  } else if(dir === 1){
+    flipShadow.style.left = '0';
+    flipShadow.style.right = '50%';
+  } else {
+    flipShadow.style.left = '50%';
+    flipShadow.style.right = '0';
+  }
+}
+
+/* ── Animate flip to a target angle, then call onComplete ── */
+function animateFlipTo(targetAngle, onComplete){
+  flip.animating = true;
+  flipPageEl.classList.add('animating');
+  /* Shadow follows */
+  var progress = Math.abs(targetAngle) / 180;
+  flipShadow.style.transition = 'opacity 0.6s cubic-bezier(.4,.0,.2,1)';
+  flipShadow.style.opacity = Math.sin(progress * Math.PI) * 0.35;
+
+  /* At target: no translateZ lift (page lands flat) */
+  flipPageEl.style.transform = 'rotateY(' + targetAngle + 'deg) translateZ(0px)';
+  flipPageEl.style.setProperty('--face-shade', progress);
+
+  var done = false;
+  function onEnd(){
+    if(done) return;
+    done = true;
+    flipPageEl.removeEventListener('transitionend', onEnd);
+    flip.animating = false;
+    flip.active = false;
+    flipPageEl.classList.remove('animating');
+    flipShadow.style.transition = '';
+    flipShadow.style.opacity = '0';
+    flipPageEl.style.setProperty('--face-shade', '0');
+    if(onComplete) onComplete();
+  }
+  flipPageEl.addEventListener('transitionend', onEnd);
+  /* Safety timeout */
+  setTimeout(onEnd, 700);
+}
+
+/* ── Tear down flip immediately ── */
+function teardownFlip(){
+  flip.active = false;
+  flip.animating = false;
+  flipPageEl.classList.remove('active','animating','flip-forward','flip-backward');
+  flipPageEl.style.transform = '';
+  flipPageEl.style.setProperty('--face-shade', '0');
+  flipShadow.style.opacity = '0';
+  flipShadow.style.transition = '';
+  flipFront.innerHTML = '';
+  flipBack.innerHTML = '';
+}
+
+/* ================================================================
+   NAVIGATION
+   ================================================================ */
+
+var pageStep = function(){ return isSingle ? 1 : 2; };
+
+function canGoNext(){ return currentPage + pageStep() < pages.length; }
+function canGoPrev(){ return currentPage > 0; }
+
+function goNext(){
+  if(!canGoNext() || flip.active) return;
+  setupFlip(1);
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      animateFlipTo(-180, function(){
+        currentPage += pageStep();
+        if(currentPage >= pages.length) currentPage = Math.max(0, pages.length - 1);
+        displayPages();
+      });
+    });
+  });
+}
+
+function goPrev(){
+  if(!canGoPrev() || flip.active) return;
+  setupFlip(-1);
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      animateFlipTo(180, function(){
+        currentPage -= pageStep();
+        if(currentPage < 0) currentPage = 0;
+        displayPages();
+      });
+    });
+  });
+}
+
+/* ── Button handlers ── */
+btnPrev.addEventListener('click', function(){ goPrev(); });
+btnNext.addEventListener('click', function(){ goNext(); });
+
+/* ── Progress bar ── */
+progressBar.addEventListener('input', function(){
+  var val = parseInt(this.value) || 0;
+  /* Snap to even in double mode */
+  if(!isSingle && val % 2 !== 0) val = Math.max(0, val - 1);
+  if(val >= pages.length) val = Math.max(0, pages.length - 1);
+  currentPage = val;
+  displayPages();
+});
+
+/* ── Keyboard ── */
+document.addEventListener('keydown', function(e){
+  if(!book.classList.contains('show')) return;
+  if(e.key === 'ArrowRight' || e.key === 'PageDown') goNext();
+  else if(e.key === 'ArrowLeft' || e.key === 'PageUp') goPrev();
+  else if(e.key === '+' || e.key === '=') changeFontSize(2);
+  else if(e.key === '-') changeFontSize(-2);
+});
+
+/* ── Mouse / Touch gestures for page turning ── */
+var gesture = { active: false, startX: 0, startY: 0, currentX: 0, currentY: 0, startTime: 0 };
+var pinch = { active: false, startDist: 0, startFS: 18 };
+
+book.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('pointercancel', onPointerUp);
+
+function onPointerDown(e){
+  if(!book.classList.contains('show')) return;
+  if(e.pointerType === 'touch' && pinch.active) return;
+  if(flip.animating) return;
+
+  gesture.active = true;
+  gesture.startX = e.clientX;
+  gesture.startY = e.clientY;
+  gesture.currentX = e.clientX;
+  gesture.currentY = e.clientY;
+  gesture.startTime = Date.now();
+}
+
+function onPointerMove(e){
+  if(!gesture.active) return;
+  gesture.currentX = e.clientX;
+  gesture.currentY = e.clientY;
+}
+
+function onPointerUp(e){
+  if(!gesture.active) return;
+  gesture.active = false;
+
+  var dx = gesture.currentX - gesture.startX;
+  var dy = gesture.currentY - gesture.startY;
+  var absDx = Math.abs(dx);
+  var absDy = Math.abs(dy);
+  var elapsed = Date.now() - gesture.startTime;
+
+  /* Swipe / drag: horizontal movement > 30px and dominant */
+  if(absDx > 30 && absDx > absDy * 0.8){
+    if(dx < 0) goNext();
+    else goPrev();
+    return;
+  }
+
+  /* Tap: little movement and short duration → corner tap */
+  if(absDx < 15 && absDy < 15 && elapsed < 400){
+    var W = window.innerWidth;
+    var tapZone = W * 0.15; /* outer 15% on each side */
+    if(gesture.startX < tapZone) goPrev();
+    else if(gesture.startX > W - tapZone) goNext();
+  }
+}
+
+/* ── Pinch to zoom (touch) ── */
+var touches = {};
+book.addEventListener('touchstart', function(e){
+  for(var i = 0; i < e.changedTouches.length; i++){
+    touches[e.changedTouches[i].identifier] = {
+      x: e.changedTouches[i].clientX,
+      y: e.changedTouches[i].clientY
+    };
+  }
+  var keys = Object.keys(touches);
+  if(keys.length === 2){
+    pinch.active = true;
+    gesture.active = false;  // cancel swipe
+    var t0 = touches[keys[0]], t1 = touches[keys[1]];
+    pinch.startDist = Math.hypot(t1.x - t0.x, t1.y - t0.y);
+    pinch.startFS = fontSize;
+  }
+}, {passive: true});
+
+book.addEventListener('touchmove', function(e){
+  for(var i = 0; i < e.changedTouches.length; i++){
+    touches[e.changedTouches[i].identifier] = {
+      x: e.changedTouches[i].clientX,
+      y: e.changedTouches[i].clientY
+    };
+  }
+  if(pinch.active){
+    var keys = Object.keys(touches);
+    if(keys.length >= 2){
+      var t0 = touches[keys[0]], t1 = touches[keys[1]];
+      var dist = Math.hypot(t1.x - t0.x, t1.y - t0.y);
+      var scale = dist / Math.max(1, pinch.startDist);
+      var newFS = Math.round(pinch.startFS * scale);
+      newFS = Math.max(10, Math.min(40, newFS));
+      if(newFS !== fontSize){
+        fontSize = newFS;
+        document.documentElement.style.setProperty('--fs', fontSize + 'px');
+      }
+    }
+    e.preventDefault();
+  }
+}, {passive: false});
+
+book.addEventListener('touchend', function(e){
+  for(var i = 0; i < e.changedTouches.length; i++){
+    delete touches[e.changedTouches[i].identifier];
+  }
+  if(Object.keys(touches).length < 2 && pinch.active){
+    pinch.active = false;
+    /* Re-paginate after pinch */
+    repaginate();
+  }
+});
+
+/* ================================================================
+   FONT SIZE
+   ================================================================ */
+
+function changeFontSize(delta){
+  fontSize = Math.max(10, Math.min(40, fontSize + delta));
+  document.documentElement.style.setProperty('--fs', fontSize + 'px');
+  repaginate();
+}
+
+btnFontDec.addEventListener('click', function(){ changeFontSize(-2); });
+btnFontInc.addEventListener('click', function(){ changeFontSize(2); });
+
+function repaginate(){
+  var oldTotal = pages.length || 1;
+  var ratio = currentPage / oldTotal;
+  paginateContent();
+  /* Preserve approximate position */
+  currentPage = Math.round(ratio * pages.length);
+  /* Snap to even for double-page mode */
+  if(!isSingle && currentPage % 2 !== 0) currentPage = Math.max(0, currentPage - 1);
+  if(currentPage >= pages.length) currentPage = Math.max(0, pages.length - (isSingle ? 1 : 2));
+  displayPages();
+}
+
+/* ================================================================
+   DARK MODE
+   ================================================================ */
+
+btnDark.addEventListener('click', function(){
+  isDark = !isDark;
+  document.body.classList.toggle('dark', isDark);
+  btnDark.textContent = isDark ? '☀' : '☾';
+  try { localStorage.setItem('epub_dark', isDark ? '1' : '0'); } catch(e){}
+});
+
+/* ================================================================
+   CONTROLS VISIBILITY — auto-hide after idle
+   ================================================================ */
+
+function showControls(){
+  controls.classList.add('show');
+  clearTimeout(controlsTimer);
+  controlsTimer = setTimeout(function(){ controls.classList.remove('show'); }, 3500);
+}
+
+document.addEventListener('mousemove', showControls);
+document.addEventListener('touchstart', showControls, {passive: true});
+document.addEventListener('keydown', showControls);
+
+/* ================================================================
+   RESIZE
+   ================================================================ */
+
+function onResize(){
+  dpr = window.devicePixelRatio || 1;
+  isSingle = window.innerWidth < 700;
+  document.body.classList.toggle('single-page', isSingle);
+  if(flip.active) teardownFlip();
+
+  if(pages.length > 0){
+    repaginate();
+  }
+}
+window.addEventListener('resize', onResize);
+
+/* ================================================================
+   FILE INPUT — load EPUB
+   ================================================================ */
+
+fileInput.addEventListener('change', async function(){
+  var file = fileInput.files[0];
+  if(!file) return;
+
+  loadStatus.textContent = 'Reading file...';
+  try {
+    var ab = await file.arrayBuffer();
+    epubData = await parseEpub(ab);
+
+    loadStatus.textContent = 'Rendering content...';
+
+    /* Concatenate all spine items */
+    allContent = '';
+    for(var i = 0; i < epubData.spine.length; i++){
+      var html = renderSpineItem(epubData, epubData.spine[i]);
+      allContent += '<div class="spine-item">' + html + '</div>';
+    }
+
+    /* Set title */
+    document.title = epubData.title + ' — EPUB Reader';
+
+    /* Initial layout — show book first so measurements work */
+    isSingle = window.innerWidth < 700;
+    document.body.classList.toggle('single-page', isSingle);
+    overlay.classList.add('hidden');
+    book.classList.add('show');
+
+    /* Restore saved settings before pagination */
+    try {
+      var savedFS = parseInt(localStorage.getItem('epub_fs')) || 18;
+      var savedDark = localStorage.getItem('epub_dark') === '1';
+      if(savedFS >= 10 && savedFS <= 40) fontSize = savedFS;
+      document.documentElement.style.setProperty('--fs', fontSize + 'px');
+      if(savedDark){ isDark = true; document.body.classList.add('dark'); btnDark.textContent = '☀'; }
+    } catch(e){}
+
+    /* Paginate (book must be visible for clientWidth) */
+    paginateContent();
+
+    /* Restore page position */
+    try {
+      var savedPage = parseInt(localStorage.getItem('epub_page')) || 0;
+      if(savedPage > 0 && savedPage < pages.length) currentPage = savedPage;
+    } catch(e){}
+
+    /* Snap to even in double mode */
+    if(!isSingle && currentPage % 2 !== 0) currentPage = Math.max(0, currentPage - 1);
+
+    displayPages();
+    showControls();
+
+  } catch(err){
+    console.error(err);
+    loadStatus.textContent = 'Error: ' + (err.message || 'Failed to load EPUB');
+  }
+});
+
+/* ================================================================
+   INIT
+   ================================================================ */
+onResize();
+
+})();
+</script>
+</body>
+</html>
