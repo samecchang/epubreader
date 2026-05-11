@@ -223,8 +223,9 @@ function animateFlip(dir){
   var rBC=rClone.querySelector('#book-content');
   if(lBC)lBC.scrollLeft=targetScroll;
   if(rBC)rBC.scrollLeft=targetScroll;
+  
 
-  var dur=2500,start=null;
+  var dur=250,start=null;
   requestAnimationFrame(function frame(ts){
     if(!start)start=ts;
     var t=Math.min((ts-start)/dur,1);
